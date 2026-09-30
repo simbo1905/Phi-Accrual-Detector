@@ -195,7 +195,7 @@ impl PhiCore for Detector {
 /// Cumulative distribution function for normal distribution
 fn normal_cdf(t: f64, mu: f64, sigma: f64) -> f64 {
     if sigma == 0. {
-        return if t == mu {
+        return if t >= mu {
             1.
         } else {
             0.
@@ -203,7 +203,7 @@ fn normal_cdf(t: f64, mu: f64, sigma: f64) -> f64 {
     }
 
     let z = (t - mu) / sigma;
-    0.5 + 0.5 * (erf(z))
+    0.5 + 0.5 * erf(z / 2.0_f64.sqrt())
 }
 
 /// Implementation of PhiInteraction for Detector
