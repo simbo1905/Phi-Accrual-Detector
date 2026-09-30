@@ -195,7 +195,7 @@ impl PhiCore for Detector {
 /// Cumulative distribution function for normal distribution
 fn normal_cdf(t: f64, mu: f64, sigma: f64) -> f64 {
     if sigma == 0. {
-        return if t == mu {
+        return if t >= mu {
             1.
         } else {
             0.
@@ -203,7 +203,7 @@ fn normal_cdf(t: f64, mu: f64, sigma: f64) -> f64 {
     }
 
     let z = (t - mu) / sigma;
-    0.5 + 0.5 * (erf(z))
+    0.5 + 0.5 * erf(z / std::f64::consts::SQRT_2)
 }
 
 /// Implementation of PhiInteraction for Detector
@@ -293,5 +293,80 @@ mod tests {
         assert_eq!(0., variance);
         curr_time = curr_time.add(Duration::milliseconds(10));
         assert_eq!(0., detector.phi(curr_time).await.unwrap());
+    }
+
+    /// P_later(t) from Eq. (3) of Hayashibara et al., evaluated by composite Simpson
+    /// integration of the normal density, so it does not depend on `erf`.
+    fn paper_p_later(t: f64, mu: f64, sigma: f64) -> f64 {
+        let density = |x: f64| {
+            (-(x - mu) * (x - mu) / (2. * sigma * sigma)).exp() / (sigma * (2. * std::f64::consts::PI).sqrt())
+        };
+        let upper = mu + 40. * sigma;
+        if t >= upper {
+            return 0.;
+        }
+        let steps = 200_000;
+        let h = (upper - t) / steps as f64;
+        let mut sum = density(t) + density(upper);
+        for k in 1..steps {
+            let weight = if k % 2 == 1 { 4. } else { 2. };
+            sum += weight * density(t + k as f64 * h);
+        }
+        sum * h / 3.
+    }
+
+    async fn detector_with_intervals(intervals: &[i64]) -> (Detector, chrono::DateTime<Local>) {
+        let detector = Detector::new(intervals.len() as u32);
+        let mut curr_time = Local::now();
+        detector.insert(curr_time).await.unwrap();
+        for interval in intervals {
+            curr_time = curr_time.add(Duration::milliseconds(*interval));
+            detector.insert(curr_time).await.unwrap();
+        }
+        (detector, curr_time)
+    }
+
+    #[test]
+    fn test_normal_cdf_matches_paper_eq3() {
+        let (mu, sigma) = (1000., 100.);
+        for i in -30..=30 {
+            let z = i as f64 / 10.;
+            let t = mu + z * sigma;
+            let expected = 1. - paper_p_later(t, mu, sigma);
+            let actual = crate::normal_cdf(t, mu, sigma);
+            assert!((actual - expected).abs() < 1e-9, "z = {z}: normal_cdf = {actual}, paper F(t) = {expected}");
+        }
+    }
+
+    #[test]
+    fn test_normal_cdf_tabulated_values() {
+        // Standard normal table: Phi(1), Phi(2), Phi(-1).
+        assert!((crate::normal_cdf(1100., 1000., 100.) - 0.841_344_746_068_543).abs() < 1e-12);
+        assert!((crate::normal_cdf(1200., 1000., 100.) - 0.977_249_868_051_821).abs() < 1e-12);
+        assert!((crate::normal_cdf(900., 1000., 100.) - 0.158_655_253_931_457).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn test_phi_matches_paper_one_sigma_late() {
+        // Alternating 900/1100 ms intervals: mean 1000 ms, population std deviation exactly 100 ms.
+        let (detector, last) = detector_with_intervals(&[900, 1100, 900, 1100, 900, 1100, 900, 1100, 900, 1100]).await;
+        let (variance, mean) = detector.variance_and_mean().await.unwrap();
+        assert_eq!((mean, variance), (1000., 10000.));
+
+        let phi = detector.phi(last.add(Duration::milliseconds(1100))).await.unwrap();
+        let expected = -paper_p_later(1100., 1000., 100.).log10();
+        assert!((expected - 0.799_546).abs() < 1e-5);
+        assert!((phi - expected).abs() < 1e-6, "phi = {phi}, paper phi = {expected}");
+    }
+
+    #[tokio::test]
+    async fn test_phi_accrues_after_constant_heartbeats_stop() {
+        // Asymptotic completeness (Property 3): once heartbeats stop, phi must grow without bound.
+        let (detector, last) = detector_with_intervals(&[10; 10]).await;
+        for silence_ms in [20, 1_000, 3_600_000] {
+            let phi = detector.phi(last.add(Duration::milliseconds(silence_ms))).await.unwrap();
+            assert_eq!(f64::INFINITY, phi, "phi after {silence_ms} ms of silence was {phi}");
+        }
+        assert_eq!(0., detector.phi(last.add(Duration::milliseconds(5))).await.unwrap());
     }
 }
