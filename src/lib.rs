@@ -235,7 +235,53 @@ mod tests {
     use std::ops::Add;
     use chrono::{Duration, Local, TimeDelta};
     use tokio::sync::RwLock;
-    use crate::{Detector, PhiCore, PhiInteraction, Statistics};
+    use crate::{normal_cdf, Detector, PhiCore, PhiInteraction, Statistics};
+
+    const EPSILON: f64 = 1e-12;
+
+    fn assert_approx_eq(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < EPSILON,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn normal_cdf_matches_standard_normal_reference_values() {
+        assert_approx_eq(normal_cdf(-1.0, 0.0, 1.0), 0.15865525393145707);
+        assert_approx_eq(normal_cdf(0.0, 0.0, 1.0), 0.5);
+        assert_approx_eq(normal_cdf(1.0, 0.0, 1.0), 0.8413447460685429);
+    }
+
+    #[test]
+    fn zero_variance_cdf_is_a_right_continuous_step_at_the_mean() {
+        assert_eq!(normal_cdf(9.0, 10.0, 0.0), 0.0);
+        assert_eq!(normal_cdf(10.0, 10.0, 0.0), 1.0);
+        assert_eq!(normal_cdf(11.0, 10.0, 0.0), 1.0);
+    }
+
+    #[tokio::test]
+    async fn phi_uses_the_standard_deviation_of_the_samples() {
+        let detector = Detector::new(10);
+        let start = Local::now();
+        detector.insert(start).await.unwrap();
+        detector
+            .insert(start.add(Duration::milliseconds(90)))
+            .await
+            .unwrap();
+        detector
+            .insert(start.add(Duration::milliseconds(200)))
+            .await
+            .unwrap();
+
+        // Intervals [90, 110] have mu=100 and sigma=10. At t=mu+sigma,
+        // phi=-log10(1-Phi(1))=0.7995455414919706.
+        let phi = detector
+            .phi(start.add(Duration::milliseconds(310)))
+            .await
+            .unwrap();
+        assert_approx_eq(phi, 0.7995455414919706);
+    }
 
     #[tokio::test]
     async fn test_variant_mean_and_variance_combo_calculation() {
@@ -272,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_constant_phi_with_constant_pings_calculation() {
+    async fn test_constant_intervals_detect_a_missing_ping() {
         let stats = Statistics::new(10);
         let detector = Detector {
             statistics: RwLock::new(stats),
@@ -292,6 +338,6 @@ mod tests {
         assert_eq!(10., mean);
         assert_eq!(0., variance);
         curr_time = curr_time.add(Duration::milliseconds(10));
-        assert_eq!(0., detector.phi(curr_time).await.unwrap());
+        assert!(detector.phi(curr_time).await.unwrap().is_infinite());
     }
 }
