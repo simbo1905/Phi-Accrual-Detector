@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(10., mean);
         assert_eq!(0., variance);
         curr_time = curr_time.add(Duration::milliseconds(10));
-        assert_eq!(0., detector.phi(curr_time).await.unwrap());
+        assert_eq!(f64::INFINITY, detector.phi(curr_time).await.unwrap());
     }
 
     /// P_later(t) from Eq. (3) of Hayashibara et al., evaluated by composite Simpson
